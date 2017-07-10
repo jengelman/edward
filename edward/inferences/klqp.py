@@ -8,10 +8,10 @@ import tensorflow as tf
 from edward.inferences.variational_inference import VariationalInference
 from edward.models import RandomVariable
 from edward.util import copy
-from tensorflow.contrib import distributions as ds
 
 try:
   from edward.models import Normal
+  from tensorflow.contrib.distributions import kl_divergence
 except Exception as e:
   raise ImportError("{0}. Your TensorFlow version is not supported.".format(e))
 
@@ -19,64 +19,55 @@ except Exception as e:
 class KLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective by automatically selecting from a
   variety of black box inference techniques.
 
-  Notes
-  -----
-  ``KLqp`` also optimizes any model parameters :math:`p(z \mid x;
-  \\theta)`. It does this by variational EM, minimizing
+  #### Notes
 
-  .. math::
+  `KLqp` also optimizes any model parameters $p(z \mid x;
+  \\theta)$. It does this by variational EM, minimizing
 
-    \mathbb{E}_{q(z; \lambda)} [ \log p(x, z; \\theta) ]
+  $\mathbb{E}_{q(z; \lambda)} [ \log p(x, z; \\theta) ]$
 
-  with respect to :math:`\\theta`.
+  with respect to $\\theta$.
 
-  In conditional inference, we infer :math:`z` in :math:`p(z, \\beta
-  \mid x)` while fixing inference over :math:`\\beta` using another
-  distribution :math:`q(\\beta)`. During gradient calculation, instead
+  In conditional inference, we infer $z$ in $p(z, \\beta
+  \mid x)$ while fixing inference over $\\beta$ using another
+  distribution $q(\\beta)$. During gradient calculation, instead
   of using the model's density
 
-  .. math::
+  $\log p(x, z^{(s)}), z^{(s)} \sim q(z; \lambda),$
 
-    \log p(x, z^{(s)}), z^{(s)} \sim q(z; \lambda),
+  for each sample $s=1,\ldots,S$, `KLqp` uses
 
-  for each sample :math:`s=1,\ldots,S`, ``KLqp`` uses
+  $\log p(x, z^{(s)}, \\beta^{(s)}),$
 
-  .. math::
-
-    \log p(x, z^{(s)}, \\beta^{(s)}),
-
-  where :math:`z^{(s)} \sim q(z; \lambda)` and :math:`\\beta^{(s)}
-  \sim q(\\beta)`.
+  where $z^{(s)} \sim q(z; \lambda)$ and $\\beta^{(s)}
+  \sim q(\\beta)$.
   """
   def __init__(self, *args, **kwargs):
     super(KLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, kl_scaling=None, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
-    kl_scaling : dict of RandomVariable to float, optional
-      Provides option to scale terms when using ELBO with KL divergence.
-      If the KL divergence terms are
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
+      kl_scaling: dict of RandomVariable to float, optional.
+        Provides option to scale terms when using ELBO with KL divergence.
+        If the KL divergence terms are
 
-      .. math::
-        \\alpha_p \mathbb{E}_{q(z\mid x, \lambda)} [
-            \log q(z\mid x, \lambda) - \log p(z)],
+        $\\alpha_p \mathbb{E}_{q(z\mid x, \lambda)} [
+              \log q(z\mid x, \lambda) - \log p(z)],$
 
-      then pass {:math:`p(z)`: :math:`\\alpha_p`} as ``kl_scaling``,
-      where :math:`\\alpha_p` is a float that specifies how much to
-      scale the KL term.
+        then pass {$p(z)$: $\\alpha_p$} as `kl_scaling`,
+        where $\\alpha_p$ is a float that specifies how much to
+        scale the KL term.
     """
     if kl_scaling is None:
       kl_scaling = {}
@@ -86,12 +77,10 @@ class KLqp(VariationalInference):
     return super(KLqp, self).initialize(*args, **kwargs)
 
   def build_loss_and_gradients(self, var_list):
-    """Wrapper for the ``KLqp`` loss function.
+    """Wrapper for the `KLqp` loss function.
 
-    .. math::
-
-      -\\text{ELBO} =
-        -\mathbb{E}_{q(z; \lambda)} [ \log p(x, z) - \log q(z; \lambda) ]
+    $-\\text{ELBO} =
+        -\mathbb{E}_{q(z; \lambda)} [ \log p(x, z) - \log q(z; \lambda) ]$
 
     KLqp supports
 
@@ -103,14 +92,12 @@ class KLqp(VariationalInference):
     If the KL divergence between the variational model and the prior
     is tractable, then the loss function can be written as
 
-    .. math::
-
-      -\mathbb{E}_{q(z; \lambda)}[\log p(x \mid z)] +
-        \\text{KL}( q(z; \lambda) \| p(z) ),
+    $-\mathbb{E}_{q(z; \lambda)}[\log p(x \mid z)] +
+        \\text{KL}( q(z; \lambda) \| p(z) ),$
 
     where the KL term is computed analytically (Kingma and Welling,
-    2014). We compute this automatically when :math:`p(z)` and
-    :math:`q(z; \lambda)` are Normal.
+    2014). We compute this automatically when $p(z)$ and
+    $q(z; \lambda)$ are Normal.
     """
     is_reparameterizable = all([
         rv.reparameterization_type ==
@@ -118,6 +105,8 @@ class KLqp(VariationalInference):
         for rv in six.itervalues(self.latent_vars)])
     is_analytic_kl = all([isinstance(z, Normal) and isinstance(qz, Normal)
                           for z, qz in six.iteritems(self.latent_vars)])
+    if not is_analytic_kl and self.kl_scaling:
+      raise TypeError("kl_scaling must be None when using non-analytic KL term")
     if is_reparameterizable:
       if is_analytic_kl:
         return build_reparam_kl_loss_and_gradients(self, var_list)
@@ -139,9 +128,7 @@ class KLqp(VariationalInference):
 class ReparameterizationKLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective using the reparameterization
   gradient.
@@ -150,13 +137,13 @@ class ReparameterizationKLqp(VariationalInference):
     super(ReparameterizationKLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
     """
     self.n_samples = n_samples
     return super(ReparameterizationKLqp, self).initialize(*args, **kwargs)
@@ -168,9 +155,7 @@ class ReparameterizationKLqp(VariationalInference):
 class ReparameterizationKLKLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective using the reparameterization
   gradient and an analytic KL term.
@@ -179,24 +164,23 @@ class ReparameterizationKLKLqp(VariationalInference):
     super(ReparameterizationKLKLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, kl_scaling=None, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
-    kl_scaling : dict of RandomVariable to float, optional
-      Provides option to scale terms when using ELBO with KL divergence.
-      If the KL divergence terms are
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
+      kl_scaling: dict of RandomVariable to float, optional.
+        Provides option to scale terms when using ELBO with KL divergence.
+        If the KL divergence terms are
 
-      .. math::
-        \\alpha_p \mathbb{E}_{q(z\mid x, \lambda)} [
-            \log q(z\mid x, \lambda) - \log p(z)],
+        $\\alpha_p \mathbb{E}_{q(z\mid x, \lambda)} [
+              \log q(z\mid x, \lambda) - \log p(z)],$
 
-      then pass {:math:`p(z)`: :math:`\\alpha_p`} as ``kl_scaling``,
-      where :math:`\\alpha_p` is a float that specifies how much to
-      scale the KL term.
+        then pass {$p(z)$: $\\alpha_p$} as `kl_scaling`,
+        where $\\alpha_p$ is a float that specifies how much to
+        scale the KL term.
     """
     if kl_scaling is None:
       kl_scaling = {}
@@ -212,9 +196,7 @@ class ReparameterizationKLKLqp(VariationalInference):
 class ReparameterizationEntropyKLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective using the reparameterization
   gradient and an analytic entropy term.
@@ -223,13 +205,13 @@ class ReparameterizationEntropyKLqp(VariationalInference):
     super(ReparameterizationEntropyKLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
     """
     self.n_samples = n_samples
     return super(ReparameterizationEntropyKLqp, self).initialize(
@@ -242,9 +224,7 @@ class ReparameterizationEntropyKLqp(VariationalInference):
 class ScoreKLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective using the score function
   gradient.
@@ -253,13 +233,13 @@ class ScoreKLqp(VariationalInference):
     super(ScoreKLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
     """
     self.n_samples = n_samples
     return super(ScoreKLqp, self).initialize(*args, **kwargs)
@@ -271,9 +251,7 @@ class ScoreKLqp(VariationalInference):
 class ScoreKLKLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective using the score function gradient
   and an analytic KL term.
@@ -282,24 +260,23 @@ class ScoreKLKLqp(VariationalInference):
     super(ScoreKLKLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, kl_scaling=None, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
-    kl_scaling : dict of RandomVariable to float, optional
-      Provides option to scale terms when using ELBO with KL divergence.
-      If the KL divergence terms are
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
+      kl_scaling: dict of RandomVariable to float, optional.
+        Provides option to scale terms when using ELBO with KL divergence.
+        If the KL divergence terms are
 
-      .. math::
-        \\alpha_p \mathbb{E}_{q(z\mid x, \lambda)} [
-            \log q(z\mid x, \lambda) - \log p(z)],
+        $\\alpha_p \mathbb{E}_{q(z\mid x, \lambda)} [
+              \log q(z\mid x, \lambda) - \log p(z)],$
 
-      then pass {:math:`p(z)`: :math:`\\alpha_p`} as ``kl_scaling``,
-      where :math:`\\alpha_p` is a float that specifies how much to
-      scale the KL term.
+        then pass {$p(z)$: $\\alpha_p$} as `kl_scaling`,
+        where $\\alpha_p$ is a float that specifies how much to
+        scale the KL term.
     """
     if kl_scaling is None:
       kl_scaling = {}
@@ -315,9 +292,7 @@ class ScoreKLKLqp(VariationalInference):
 class ScoreEntropyKLqp(VariationalInference):
   """Variational inference with the KL divergence
 
-  .. math::
-
-    \\text{KL}( q(z; \lambda) \| p(z \mid x) ).
+  $\\text{KL}( q(z; \lambda) \| p(z \mid x) ).$
 
   This class minimizes the objective using the score function gradient
   and an analytic entropy term.
@@ -326,13 +301,13 @@ class ScoreEntropyKLqp(VariationalInference):
     super(ScoreEntropyKLqp, self).__init__(*args, **kwargs)
 
   def initialize(self, n_samples=1, *args, **kwargs):
-    """Initialization.
+    """Initialize inference algorithm. It initializes hyperparameters
+    and builds ops for the algorithm's computation graph.
 
-    Parameters
-    ----------
-    n_samples : int, optional
-      Number of samples from variational model for calculating
-      stochastic gradients.
+    Args:
+      n_samples: int, optional.
+        Number of samples from variational model for calculating
+        stochastic gradients.
     """
     self.n_samples = n_samples
     return super(ScoreEntropyKLqp, self).initialize(*args, **kwargs)
@@ -345,22 +320,21 @@ def build_reparam_loss_and_gradients(inference, var_list):
   """Build loss function. Its automatic differentiation
   is a stochastic gradient of
 
-  .. math::
-
-    -\\text{ELBO} =
-      -\mathbb{E}_{q(z; \lambda)} [ \log p(x, z) - \log q(z; \lambda) ]
+  $-\\text{ELBO} =
+      -\mathbb{E}_{q(z; \lambda)} [ \log p(x, z) - \log q(z; \lambda) ]$
 
   based on the reparameterization trick (Kingma and Welling, 2014).
 
-  Computed by sampling from :math:`q(z;\lambda)` and evaluating the
+  Computed by sampling from $q(z;\lambda)$ and evaluating the
   expectation using Monte Carlo sampling.
   """
   p_log_prob = [0.0] * inference.n_samples
   q_log_prob = [0.0] * inference.n_samples
+  base_scope = tf.get_default_graph().unique_name("inference") + '/'
   for s in range(inference.n_samples):
     # Form dictionary in order to replace conditioning on prior or
     # observed variable with conditioning on a specific value.
-    scope = 'inference_' + str(id(inference)) + '/' + str(s)
+    scope = base_scope + tf.get_default_graph().unique_name("sample")
     dict_swap = {}
     for x, qx in six.iteritems(inference.data):
       if isinstance(x, RandomVariable):
@@ -392,9 +366,10 @@ def build_reparam_loss_and_gradients(inference, var_list):
   q_log_prob = tf.reduce_mean(q_log_prob)
 
   if inference.logging:
-    summary_key = 'summaries_' + str(id(inference))
-    tf.summary.scalar("loss/p_log_prob", p_log_prob, collections=[summary_key])
-    tf.summary.scalar("loss/q_log_prob", q_log_prob, collections=[summary_key])
+    tf.summary.scalar("loss/p_log_prob", p_log_prob,
+                      collections=[inference._summary_key])
+    tf.summary.scalar("loss/q_log_prob", q_log_prob,
+                      collections=[inference._summary_key])
 
   loss = -(p_log_prob - q_log_prob)
 
@@ -416,14 +391,15 @@ def build_reparam_kl_loss_and_gradients(inference, var_list):
 
   It assumes the KL is analytic.
 
-  Computed by sampling from :math:`q(z;\lambda)` and evaluating the
+  Computed by sampling from $q(z;\lambda)$ and evaluating the
   expectation using Monte Carlo sampling.
   """
   p_log_lik = [0.0] * inference.n_samples
+  base_scope = tf.get_default_graph().unique_name("inference") + '/'
   for s in range(inference.n_samples):
     # Form dictionary in order to replace conditioning on prior or
     # observed variable with conditioning on a specific value.
-    scope = 'inference_' + str(id(inference)) + '/' + str(s)
+    scope = base_scope + tf.get_default_graph().unique_name("sample")
     dict_swap = {}
     for x, qx in six.iteritems(inference.data):
       if isinstance(x, RandomVariable):
@@ -447,13 +423,14 @@ def build_reparam_kl_loss_and_gradients(inference, var_list):
   p_log_lik = tf.reduce_mean(p_log_lik)
 
   kl_penalty = tf.reduce_sum([
-      inference.kl_scaling.get(z, 1.0) * tf.reduce_sum(ds.kl(qz, z))
+      inference.kl_scaling.get(z, 1.0) * tf.reduce_sum(kl_divergence(qz, z))
       for z, qz in six.iteritems(inference.latent_vars)])
 
   if inference.logging:
-    summary_key = 'summaries_' + str(id(inference))
-    tf.summary.scalar("loss/p_log_lik", p_log_lik, collections=[summary_key])
-    tf.summary.scalar("loss/kl_penalty", kl_penalty, collections=[summary_key])
+    tf.summary.scalar("loss/p_log_lik", p_log_lik,
+                      collections=[inference._summary_key])
+    tf.summary.scalar("loss/kl_penalty", kl_penalty,
+                      collections=[inference._summary_key])
 
   loss = -(p_log_lik - kl_penalty)
 
@@ -466,23 +443,22 @@ def build_reparam_entropy_loss_and_gradients(inference, var_list):
   """Build loss function. Its automatic differentiation
   is a stochastic gradient of
 
-  .. math::
-
-    -\\text{ELBO} =  -( \mathbb{E}_{q(z; \lambda)} [ \log p(x , z) ]
-          + \mathbb{H}(q(z; \lambda)) )
+  $-\\text{ELBO} =  -( \mathbb{E}_{q(z; \lambda)} [ \log p(x , z) ]
+          + \mathbb{H}(q(z; \lambda)) )$
 
   based on the reparameterization trick (Kingma and Welling, 2014).
 
   It assumes the entropy is analytic.
 
-  Computed by sampling from :math:`q(z;\lambda)` and evaluating the
+  Computed by sampling from $q(z;\lambda)$ and evaluating the
   expectation using Monte Carlo sampling.
   """
   p_log_prob = [0.0] * inference.n_samples
+  base_scope = tf.get_default_graph().unique_name("inference") + '/'
   for s in range(inference.n_samples):
     # Form dictionary in order to replace conditioning on prior or
     # observed variable with conditioning on a specific value.
-    scope = 'inference_' + str(id(inference)) + '/' + str(s)
+    scope = base_scope + tf.get_default_graph().unique_name("sample")
     dict_swap = {}
     for x, qx in six.iteritems(inference.data):
       if isinstance(x, RandomVariable):
@@ -514,9 +490,10 @@ def build_reparam_entropy_loss_and_gradients(inference, var_list):
       qz.entropy() for z, qz in six.iteritems(inference.latent_vars)])
 
   if inference.logging:
-    summary_key = 'summaries_' + str(id(inference))
-    tf.summary.scalar("loss/p_log_prob", p_log_prob, collections=[summary_key])
-    tf.summary.scalar("loss/q_entropy", q_entropy, collections=[summary_key])
+    tf.summary.scalar("loss/p_log_prob", p_log_prob,
+                      collections=[inference._summary_key])
+    tf.summary.scalar("loss/q_entropy", q_entropy,
+                      collections=[inference._summary_key])
 
   loss = -(p_log_prob + q_entropy)
 
@@ -529,15 +506,16 @@ def build_score_loss_and_gradients(inference, var_list):
   """Build loss function and gradients based on the score function
   estimator (Paisley et al., 2012).
 
-  Computed by sampling from :math:`q(z;\lambda)` and evaluating the
+  Computed by sampling from $q(z;\lambda)$ and evaluating the
   expectation using Monte Carlo sampling.
   """
   p_log_prob = [0.0] * inference.n_samples
   q_log_prob = [0.0] * inference.n_samples
+  base_scope = tf.get_default_graph().unique_name("inference") + '/'
   for s in range(inference.n_samples):
     # Form dictionary in order to replace conditioning on prior or
     # observed variable with conditioning on a specific value.
-    scope = 'inference_' + str(id(inference)) + '/' + str(s)
+    scope = base_scope + tf.get_default_graph().unique_name("sample")
     dict_swap = {}
     for x, qx in six.iteritems(inference.data):
       if isinstance(x, RandomVariable):
@@ -570,11 +548,10 @@ def build_score_loss_and_gradients(inference, var_list):
   q_log_prob = tf.stack(q_log_prob)
 
   if inference.logging:
-    summary_key = 'summaries_' + str(id(inference))
     tf.summary.scalar("loss/p_log_prob", tf.reduce_mean(p_log_prob),
-                      collections=[summary_key])
+                      collections=[inference._summary_key])
     tf.summary.scalar("loss/q_log_prob", tf.reduce_mean(q_log_prob),
-                      collections=[summary_key])
+                      collections=[inference._summary_key])
 
   losses = p_log_prob - q_log_prob
   loss = -tf.reduce_mean(losses)
@@ -592,15 +569,16 @@ def build_score_kl_loss_and_gradients(inference, var_list):
 
   It assumes the KL is analytic.
 
-  Computed by sampling from :math:`q(z;\lambda)` and evaluating the
+  Computed by sampling from $q(z;\lambda)$ and evaluating the
   expectation using Monte Carlo sampling.
   """
   p_log_lik = [0.0] * inference.n_samples
   q_log_prob = [0.0] * inference.n_samples
+  base_scope = tf.get_default_graph().unique_name("inference") + '/'
   for s in range(inference.n_samples):
     # Form dictionary in order to replace conditioning on prior or
     # observed variable with conditioning on a specific value.
-    scope = 'inference_' + str(id(inference)) + '/' + str(s)
+    scope = base_scope + tf.get_default_graph().unique_name("sample")
     dict_swap = {}
     for x, qx in six.iteritems(inference.data):
       if isinstance(x, RandomVariable):
@@ -628,14 +606,14 @@ def build_score_kl_loss_and_gradients(inference, var_list):
   q_log_prob = tf.stack(q_log_prob)
 
   kl_penalty = tf.reduce_sum([
-      inference.kl_scaling.get(z, 1.0) * tf.reduce_sum(ds.kl(qz, z))
+      inference.kl_scaling.get(z, 1.0) * tf.reduce_sum(kl_divergence(qz, z))
       for z, qz in six.iteritems(inference.latent_vars)])
 
   if inference.logging:
-    summary_key = 'summaries_' + str(id(inference))
     tf.summary.scalar("loss/p_log_lik", tf.reduce_mean(p_log_lik),
-                      collections=[summary_key])
-    tf.summary.scalar("loss/kl_penalty", kl_penalty, collections=[summary_key])
+                      collections=[inference._summary_key])
+    tf.summary.scalar("loss/kl_penalty", kl_penalty,
+                      collections=[inference._summary_key])
 
   loss = -(tf.reduce_mean(p_log_lik) - kl_penalty)
   grads = tf.gradients(
@@ -651,15 +629,16 @@ def build_score_entropy_loss_and_gradients(inference, var_list):
 
   It assumes the entropy is analytic.
 
-  Computed by sampling from :math:`q(z;\lambda)` and evaluating the
+  Computed by sampling from $q(z;\lambda)$ and evaluating the
   expectation using Monte Carlo sampling.
   """
   p_log_prob = [0.0] * inference.n_samples
   q_log_prob = [0.0] * inference.n_samples
+  base_scope = tf.get_default_graph().unique_name("inference") + '/'
   for s in range(inference.n_samples):
     # Form dictionary in order to replace conditioning on prior or
     # observed variable with conditioning on a specific value.
-    scope = 'inference_' + str(id(inference)) + '/' + str(s)
+    scope = base_scope + tf.get_default_graph().unique_name("sample")
     dict_swap = {}
     for x, qx in six.iteritems(inference.data):
       if isinstance(x, RandomVariable):
@@ -695,12 +674,12 @@ def build_score_entropy_loss_and_gradients(inference, var_list):
       qz.entropy() for z, qz in six.iteritems(inference.latent_vars)])
 
   if inference.logging:
-    summary_key = 'summaries_' + str(id(inference))
     tf.summary.scalar("loss/p_log_prob", tf.reduce_mean(p_log_prob),
-                      collections=[summary_key])
+                      collections=[inference._summary_key])
     tf.summary.scalar("loss/q_log_prob", tf.reduce_mean(q_log_prob),
-                      collections=[summary_key])
-    tf.summary.scalar("loss/q_entropy", q_entropy, collections=[summary_key])
+                      collections=[inference._summary_key])
+    tf.summary.scalar("loss/q_entropy", q_entropy,
+                      collections=[inference._summary_key])
 
   loss = -(tf.reduce_mean(p_log_prob) + q_entropy)
   grads = tf.gradients(

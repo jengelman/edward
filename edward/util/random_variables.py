@@ -79,7 +79,7 @@ def check_latent_vars(latent_vars):
                       "dtype: {}, {}".format(key.dtype, value.dtype))
 
 
-def copy_default(x, *args, **kwargs):
+def _copy_default(x, *args, **kwargs):
   if isinstance(x, (RandomVariable, tf.Operation, tf.Tensor, tf.Variable)):
     x = copy(x, *args, **kwargs)
 
@@ -100,55 +100,54 @@ def copy(org_instance, dict_swap=None, scope="copied",
   always reused and not copied. In addition, `tf.Operation`s with
   operation-level seeds are copied with a new operation-level seed.
 
-  Parameters
-  ----------
-  org_instance : RandomVariable, tf.Operation, tf.Tensor, or tf.Variable
-    Node to add in graph with replaced ancestors.
-  dict_swap : dict, optional
-    Random variables, variables, tensors, or operations to swap with.
-    Its keys are what `org_instance` may depend on, and its values are
-    the corresponding object (not necessarily of the same class
-    instance, but must have the same type, e.g., float32) that is used
-    in exchange.
-  scope : str, optional
-    A scope for the new node(s). This is used to avoid name
-    conflicts with the original node(s).
-  replace_itself : bool, optional
-    Whether to replace `org_instance` itself if it exists in
-    `dict_swap`. (This is used for the recursion.)
-  copy_q : bool, optional
-    Whether to copy the replaced tensors too (if not already
-    copied within the new scope). Otherwise will reuse them.
+  Args:
+    org_instance: RandomVariable, tf.Operation, tf.Tensor, or tf.Variable.
+      Node to add in graph with replaced ancestors.
+    dict_swap: dict, optional.
+      Random variables, variables, tensors, or operations to swap with.
+      Its keys are what `org_instance` may depend on, and its values are
+      the corresponding object (not necessarily of the same class
+      instance, but must have the same type, e.g., float32) that is used
+      in exchange.
+    scope: str, optional.
+      A scope for the new node(s). This is used to avoid name
+      conflicts with the original node(s).
+    replace_itself: bool, optional
+      Whether to replace `org_instance` itself if it exists in
+      `dict_swap`. (This is used for the recursion.)
+    copy_q: bool, optional>
+      Whether to copy the replaced tensors too (if not already
+      copied within the new scope). Otherwise will reuse them.
 
-  Returns
-  -------
-  RandomVariable, tf.Variable, tf.Tensor, or tf.Operation
+  Returns:
+    RandomVariable, tf.Variable, tf.Tensor, or tf.Operation.
     The copied node.
 
-  Raises
-  ------
-  TypeError
+  Raises:
+    TypeError.
     If `org_instance` is not one of the above types.
 
-  Examples
-  --------
-  >>> x = tf.constant(2.0)
-  >>> y = tf.constant(3.0)
-  >>> z = x * y
-  >>>
-  >>> qx = tf.constant(4.0)
-  >>> # The TensorFlow graph is currently
-  >>> # `x` -> `z` <- y`, `qx`
-  >>>
-  >>> # This adds a subgraph with newly copied nodes,
-  >>> # `qx` -> `copied/z` <- `copied/y`
-  >>> z_new = ed.copy(z, {x: qx})
-  >>>
-  >>> sess = tf.Session()
-  >>> sess.run(z)
+  #### Examples
+
+  ```python
+  x = tf.constant(2.0)
+  y = tf.constant(3.0)
+  z = x * y
+
+  qx = tf.constant(4.0)
+  # The TensorFlow graph is currently
+  # `x` -> `z` <- y`, `qx`
+
+  # This adds a subgraph with newly copied nodes,
+  # `qx` -> `copied/z` <- `copied/y`
+  z_new = ed.copy(z, {x: qx})
+
+  sess = tf.Session()
+  sess.run(z)
   6.0
-  >>> sess.run(z_new)
+  sess.run(z_new)
   12.0
+  ```
   """
   if not isinstance(org_instance,
                     (RandomVariable, tf.Operation, tf.Tensor, tf.Variable)):
@@ -156,6 +155,8 @@ def copy(org_instance, dict_swap=None, scope="copied",
 
   if dict_swap is None:
     dict_swap = {}
+  if scope[-1] != '/':
+    scope += '/'
 
   # Swap instance if in dictionary.
   if org_instance in dict_swap and replace_itself:
@@ -197,12 +198,12 @@ def copy(org_instance, dict_swap=None, scope="copied",
           return variable
 
   graph = tf.get_default_graph()
-  new_name = scope + '/' + org_instance.name
+  new_name = scope + org_instance.name
 
   # If an instance of the same name exists, return it.
   if isinstance(org_instance, RandomVariable):
     for rv in random_variables():
-      if new_name == rv.unique_name:
+      if new_name == rv.name:
         return rv
   elif isinstance(org_instance, (tf.Tensor, tf.Operation)):
     try:
@@ -216,20 +217,28 @@ def copy(org_instance, dict_swap=None, scope="copied",
     rv = org_instance
 
     # If it has copiable arguments, copy them.
-    args = [copy_default(arg, dict_swap, scope, True, copy_q)
+    args = [_copy_default(arg, dict_swap, scope, True, copy_q)
             for arg in rv._args]
 
     kwargs = {}
     for key, value in six.iteritems(rv._kwargs):
       if isinstance(value, list):
-        kwargs[key] = [copy_default(v, dict_swap, scope, True, copy_q)
+        kwargs[key] = [_copy_default(v, dict_swap, scope, True, copy_q)
                        for v in value]
       else:
-        kwargs[key] = copy_default(value, dict_swap, scope, True, copy_q)
+        kwargs[key] = _copy_default(value, dict_swap, scope, True, copy_q)
 
     kwargs['name'] = new_name
     # Create new random variable with copied arguments.
-    new_rv = type(rv)(*args, **kwargs)
+    try:
+      new_rv = type(rv)(*args, **kwargs)
+    except ValueError:
+      # Handle case where parameters are copied under absolute name
+      # scope. This can cause an error when creating a new random
+      # variable as tf.identity name ops are called on parameters ("op
+      # with name already exists"). To avoid remove absolute name scope.
+      kwargs['name'] = new_name[:-1]
+      new_rv = type(rv)(*args, **kwargs)
     return new_rv
   elif isinstance(org_instance, tf.Tensor):
     tensor = org_instance
@@ -366,26 +375,25 @@ def copy(org_instance, dict_swap=None, scope="copied",
 def get_ancestors(x, collection=None):
   """Get ancestor random variables of input.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find ancestors of.
-  collection : list of RandomVariable, optional
-    The collection of random variables to check with respect to;
-    defaults to all random variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor.
+      Query node to find ancestors of.
+    collection: list of RandomVariable, optional.
+      The collection of random variables to check with respect to;
+      defaults to all random variables in the graph.
 
-  Returns
-  -------
-  list of RandomVariable
+  Returns:
+    list of RandomVariable.
     Ancestor random variables of x.
 
-  Examples
-  --------
-  >>> a = Normal(0.0, 1.0)
-  >>> b = Normal(a, 1.0)
-  >>> c = Normal(0.0, 1.0)
-  >>> d = Normal(b * c, 1.0)
-  >>> assert set(ed.get_ancestors(d)) == set([a, b, c])
+  #### Examples
+  ```python
+  a = Normal(0.0, 1.0)
+  b = Normal(a, 1.0)
+  c = Normal(0.0, 1.0)
+  d = Normal(b * c, 1.0)
+  assert set(ed.get_ancestors(d)) == set([a, b, c])
+  ```
   """
   if collection is None:
     collection = random_variables()
@@ -419,27 +427,27 @@ def get_blanket(x, collection=None):
   """Get Markov blanket of input, which consists of its parents, its
   children, and the other parents of its children.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find Markov blanket of.
-  collection : list of RandomVariable, optional
-    The collection of random variables to check with respect to;
-    defaults to all random variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor.
+      Query node to find Markov blanket of.
+    collection: list of RandomVariable, optional.
+      The collection of random variables to check with respect to;
+      defaults to all random variables in the graph.
 
-  Returns
-  -------
-  list of RandomVariable
+  Returns:
+    list of RandomVariable.
     Markov blanket of x.
 
-  Examples
-  --------
-  >>> a = Normal(0.0, 1.0)
-  >>> b = Normal(0.0, 1.0)
-  >>> c = Normal(a * b, 1.0)
-  >>> d = Normal(0.0, 1.0)
-  >>> e = Normal(c * d, 1.0)
-  >>> assert set(ed.get_blanket(c)) == set([a, b, d, e])
+  #### Examples
+
+  ```python
+  a = Normal(0.0, 1.0)
+  b = Normal(0.0, 1.0)
+  c = Normal(a * b, 1.0)
+  d = Normal(0.0, 1.0)
+  e = Normal(c * d, 1.0)
+  assert set(ed.get_blanket(c)) == set([a, b, d, e])
+  ```
   """
   output = set()
   output.update(get_parents(x, collection))
@@ -455,26 +463,26 @@ def get_blanket(x, collection=None):
 def get_children(x, collection=None):
   """Get child random variables of input.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find children of.
-  collection : list of RandomVariable, optional
-    The collection of random variables to check with respect to;
-    defaults to all random variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor>
+      Query node to find children of.
+    collection: list of RandomVariable, optional>
+      The collection of random variables to check with respect to;
+      defaults to all random variables in the graph.
 
-  Returns
-  -------
-  list of RandomVariable
+  Returns:
+    list of RandomVariable.
     Child random variables of x.
 
-  Examples
-  --------
-  >>> a = Normal(0.0, 1.0)
-  >>> b = Normal(a, 1.0)
-  >>> c = Normal(a, 1.0)
-  >>> d = Normal(c, 1.0)
-  >>> assert set(ed.get_children(a)) == set([b, c])
+  #### Examples
+
+  ```python
+  a = Normal(0.0, 1.0)
+  b = Normal(a, 1.0)
+  c = Normal(a, 1.0)
+  d = Normal(c, 1.0)
+  assert set(ed.get_children(a)) == set([b, c])
+  ```
   """
   if collection is None:
     collection = random_variables()
@@ -508,26 +516,26 @@ def get_children(x, collection=None):
 def get_descendants(x, collection=None):
   """Get descendant random variables of input.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find descendants of.
-  collection : list of RandomVariable, optional
-    The collection of random variables to check with respect to;
-    defaults to all random variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor.
+      Query node to find descendants of.
+    collection: list of RandomVariable, optional.
+      The collection of random variables to check with respect to;
+      defaults to all random variables in the graph.
 
-  Returns
-  -------
-  list of RandomVariable
+  Returns:
+    list of RandomVariable.
     Descendant random variables of x.
 
-  Examples
-  --------
-  >>> a = Normal(0.0, 1.0)
-  >>> b = Normal(a, 1.0)
-  >>> c = Normal(a, 1.0)
-  >>> d = Normal(c, 1.0)
-  >>> assert set(ed.get_descendants(a)) == set([b, c, d])
+  #### Examples
+
+  ```python
+  a = Normal(0.0, 1.0)
+  b = Normal(a, 1.0)
+  c = Normal(a, 1.0)
+  d = Normal(c, 1.0)
+  assert set(ed.get_descendants(a)) == set([b, c, d])
+  ```
   """
   if collection is None:
     collection = random_variables()
@@ -561,26 +569,26 @@ def get_descendants(x, collection=None):
 def get_parents(x, collection=None):
   """Get parent random variables of input.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find parents of.
-  collection : list of RandomVariable, optional
-    The collection of random variables to check with respect to;
-    defaults to all random variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor.
+      Query node to find parents of.
+    collection: list of RandomVariable, optional.
+      The collection of random variables to check with respect to;
+      defaults to all random variables in the graph.
 
-  Returns
-  -------
-  list of RandomVariable
+  Returns:
+    list of RandomVariable.
     Parent random variables of x.
 
-  Examples
-  --------
-  >>> a = Normal(0.0, 1.0)
-  >>> b = Normal(a, 1.0)
-  >>> c = Normal(0.0, 1.0)
-  >>> d = Normal(b * c, 1.0)
-  >>> assert set(ed.get_parents(d)) == set([b, c])
+  #### Examples
+
+  ```python
+  a = Normal(0.0, 1.0)
+  b = Normal(a, 1.0)
+  c = Normal(0.0, 1.0)
+  d = Normal(b * c, 1.0)
+  assert set(ed.get_parents(d)) == set([b, c])
+  ```
   """
   if collection is None:
     collection = random_variables()
@@ -613,25 +621,25 @@ def get_parents(x, collection=None):
 def get_siblings(x, collection=None):
   """Get sibling random variables of input.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find siblings of.
-  collection : list of RandomVariable, optional
-    The collection of random variables to check with respect to;
-    defaults to all random variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor.
+      Query node to find siblings of.
+    collection: list of RandomVariable, optional.
+      The collection of random variables to check with respect to;
+      defaults to all random variables in the graph.
 
-  Returns
-  -------
-  list of RandomVariable
+  Returns:
+    list of RandomVariable.
     Sibling random variables of x.
 
-  Examples
-  --------
-  >>> a = Normal(0.0, 1.0)
-  >>> b = Normal(a, 1.0)
-  >>> c = Normal(a, 1.0)
-  >>> assert ed.get_siblings(b) == [c]
+  #### Examples
+
+  ```python
+  a = Normal(0.0, 1.0)
+  b = Normal(a, 1.0)
+  c = Normal(a, 1.0)
+  assert ed.get_siblings(b) == [c]
+  ```
   """
   parents = get_parents(x, collection)
   siblings = set()
@@ -645,25 +653,25 @@ def get_siblings(x, collection=None):
 def get_variables(x, collection=None):
   """Get parent TensorFlow variables of input.
 
-  Parameters
-  ----------
-  x : RandomVariable or tf.Tensor
-    Query node to find parents of.
-  collection : list of tf.Variable, optional
-    The collection of variables to check with respect to; defaults to
-    all variables in the graph.
+  Args:
+    x: RandomVariable or tf.Tensor.
+      Query node to find parents of.
+    collection: list of tf.Variable, optional.
+      The collection of variables to check with respect to; defaults to
+      all variables in the graph.
 
-  Returns
-  -------
-  list of tf.Variable
+  Returns:
+    list of tf.Variable.
     TensorFlow variables that x depends on.
 
-  Examples
-  --------
-  >>> a = tf.Variable(0.0)
-  >>> b = tf.Variable(0.0)
-  >>> c = Normal(a * b, 1.0)
-  >>> assert set(ed.get_variables(c)) == set([a, b])
+  #### Examples
+
+  ```python
+  a = tf.Variable(0.0)
+  b = tf.Variable(0.0)
+  c = Normal(a * b, 1.0)
+  assert set(ed.get_variables(c)) == set([a, b])
+  ```
   """
   if collection is None:
     collection = tf.global_variables()
